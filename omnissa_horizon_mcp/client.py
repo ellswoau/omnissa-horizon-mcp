@@ -51,6 +51,7 @@ class HorizonClient:
         self._refresh_token: Optional[str] = None
         self._lock = threading.Lock()
         self._token_expires_at: float = 0.0
+        self._debug = False
 
     # ------------------------------------------------------------------ auth
     @staticmethod
@@ -84,6 +85,13 @@ class HorizonClient:
 
         last_resp = None
         for body in candidate_bodies:
+            if self._debug:
+                debug_body = dict(body)
+                if "password" in debug_body:
+                    debug_body["password"] = "*REDACTED*"
+                print(f"[debug] POST {url}", flush=True)
+                print(f"[debug]   headers: {dict(self._session.headers)}", flush=True)
+                print(f"[debug]   body: {json.dumps(debug_body)}", flush=True)
             resp = self._session.post(
                 url, json=body, timeout=self.timeout, verify=self.verify_ssl,
             )

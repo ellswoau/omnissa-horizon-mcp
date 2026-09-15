@@ -67,6 +67,7 @@ def _cmd_ping(args: argparse.Namespace) -> int:
     try:
         config = load_config(config_file=args.config)
         client = get_client(config)
+        client._debug = bool(getattr(args, "debug", False))
         info = client.test_connection()
         print("Connected OK:")
         for k, v in info.items():
@@ -101,6 +102,8 @@ def main(argv=None) -> int:
     # CLI connectivity test.
     p_ping = sub.add_parser("ping", help="Test connectivity/credentials")
     p_ping.add_argument("--config", default=None, help="Path to config JSON file")
+    p_ping.add_argument("--debug", action="store_true",
+                        help="Print the exact login request being sent (password redacted)")
     p_ping.set_defaults(func=_cmd_ping)
 
     args = parser.parse_args(argv)
