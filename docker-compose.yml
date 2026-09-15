@@ -1,0 +1,34 @@
+# Omnissa Horizon MCP server — Docker Compose (network daemon mode).
+#
+# This composes the server as a long-running HTTP/SSE daemon so an MCP client
+# can reach it over the network. For the embedded/stdio pattern (single MCP
+# client such as Claude Desktop spawning the container), see the README
+# "Run via Docker (stdio)" section instead.
+
+services:
+  horizon-mcp:
+    build: .
+    image: omnissa-horizon-mcp:latest
+    container_name: horizon-mcp
+    restart: unless-stopped
+    # Run as a streamable-http daemon (default). Swap to "sse" if preferred.
+    command: ["--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    # Credentials. Prefer a mounted config file (see volumes) or HORIZON_* env.
+    # Set HORIZON_VERIFY_SSL=false only if your Connection Server uses a
+    # self-signed/test certificate that the container does not trust.
+    environment:
+      HORIZON_CONFIG_FILE: /config/horizon.json
+      # HORIZON_VERIFY_SSL: "false"
+    volumes:
+      # Mount a config file written by `config init` (0600). The container runs
+      # as a non-root user; set HORIZON_VERIFY_SSL and file perms accordingly.
+      - ./horizon.json:/config/horizon.json:ro
+    # Optional: only meaningful when the daemon is actually listening.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket,sys; socket.create_connection(('127.0.0.1', 8000), 6).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

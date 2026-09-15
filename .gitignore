@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+horizon.json
+*.egg-info/
+dist/
+build/
+.venv/
+*.log
