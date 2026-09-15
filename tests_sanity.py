@@ -57,7 +57,30 @@ class HorizonClientTest(unittest.TestCase):
         body = login.get("json")
         self.assertEqual(body["username"], "svc")
         self.assertEqual(body["domain"], "CORP")
-        self.assertEqual(body["password"], ["pw"])
+        # Real Horizon servers expect a plain-string password (not an array).
+        self.assertEqual(body["password"], "pw")
+
+    def test_login_falls_back_to_array_on_mismatch(self):
+        client = make_client()
+        calls = []
+        mismatch = FakeResponse(400, {
+            "status": "BAD_REQUEST", "timestamp": 1234,
+            "errors": [{"error_key": "attr.common.request.input.mismatch.error",
+                          "error_message": "Value for password in the input request "
+                                            "cannot be mapped to the corresponding field."}],
+        })
+
+        def fake_request(method, url, **kwargs):
+            calls.append(kwargs.get("json", {}).get("password"))
+            if isinstance(kwargs.get("json", {}).get("password"), list):
+                return _ok({"access_token": "AT", "refresh_token": "RT"})
+            return mismatch
+
+        with mock.patch.object(client._session, "request", side_effect=fake_request):
+            tok = client._ensure_token()
+            self.assertEqual(tok, "AT")
+        # First sent as string, then fell back to array on the mismatch.
+        self.assertEqual(calls, ["pw", ["pw"]])
 
     def test_pagination_walks_until_short_page(self):
         client = make_client()

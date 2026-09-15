@@ -53,25 +53,59 @@ class HorizonClient:
         self._token_expires_at: float = 0.0
 
     # ------------------------------------------------------------------ auth
+    @staticmethod
+    def _is_input_mismatch(resp: requests.Response) -> bool:
+        """True if Horizon answers 400 with a 'cannot be mapped' input-mismatch
+        error (i.e. the login body shape is wrong)."""
+        if resp.status_code != 400:
+            return False
+        try:
+            payload = resp.json()
+        except ValueError:
+            return False
+        text = json.dumps(payload).lower()
+        return "mismatch" in text or "cannot be mapped" in text
+
     def _login(self) -> None:
-        body = {
+        base = {
             "username": self.config.username,
-            "password": [self.config.password],
             "domain": self.config.domain,
         }
         url = f"{self.base_url}{self.BASE}/login"
-        resp = self._session.post(
-            url,
-            json=body,
-            timeout=self.timeout,
-            verify=self.verify_ssl,
-        )
-        self._raise_for(resp, url)
-        data = resp.json()
+
+        # Most real Horizon Connection Servers expect a plain-string password.
+        # The 2506 swagger documents an array form (used for smart-card/cert
+        # logins); some builds require it. Try string first, then fall back to
+        # the array only for the specific "cannot be mapped" mismatch error.
+        candidate_bodies = [
+            {**base, "password": self.config.password},
+            {**base, "password": [self.config.password]},
+        ]
+
+        last_resp = None
+        for body in candidate_bodies:
+            resp = self._session.post(
+                url, json=body, timeout=self.timeout, verify=self.verify_ssl,
+            )
+            if resp.status_code < 400:
+                last_resp = resp
+                break
+            # Only retry with the alternate shape on a type-mismatch; genuine
+            # auth failures (401) or other errors should surface immediately.
+            if not self._is_input_mismatch(resp):
+                last_resp = resp
+                break
+            last_resp = resp
+
+        self._raise_for(last_resp, url)
+        data = last_resp.json()
         self._access_token = data.get("access_token")
         self._refresh_token = data.get("refresh_token")
         if not self._access_token:
-            raise HorizonError(resp.status_code, "Login succeeded but no access_token returned.")
+            raise HorizonError(
+                last_resp.status_code,
+                "Login succeeded but no access_token returned.",
+            )
         # Horizon access tokens are short-lived; treat as ~8 minutes (420s).
         self._token_expires_at = time.time() + 420
 
