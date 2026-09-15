@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from ..config import HorizonConfig
 
 from ..client import get_client
+from ._common import build_filter, contains_filter, equals_filter
 
 
 def _machine_brief(m: dict) -> dict:
@@ -25,6 +26,26 @@ def _machine_brief(m: dict) -> dict:
     }
 
 
+def _machine_filter_params(pool_id: Optional[str], machine_name: Optional[str],
+                           state: Optional[str]) -> Optional[dict]:
+    """Build the ``filter`` query params for /inventory machines listing.
+
+    Horizon expects a JSON filter object, not ``field 'value'``. The machine
+    name field is ``name`` (Contains for the documented substring search);
+    pool id and state are exact Equals matches.
+    """
+    clauses = []
+    if pool_id:
+        clauses.append(equals_filter("desktop_pool_id", pool_id))
+    if machine_name:
+        clauses.append(contains_filter("name", machine_name))
+    if state:
+        clauses.append(equals_filter("state", state))
+    if not clauses:
+        return None
+    return {"filter": build_filter(clauses)}
+
+
 def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
     @mcp.tool()
     def list_machines(pool_id: Optional[str] = None, machine_name: Optional[str] = None,
@@ -33,14 +54,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         desktop pool id, machine name substring, or machine state (e.g. AVAILABLE
         / CONNECTED / ERROR). Returns id, name, dns, state and assigned users."""
         client = get_client(config)
-        filters = []
-        if pool_id:
-            filters.append(f"desktop_pool_id '{pool_id}'")
-        if machine_name:
-            filters.append(f"name '{machine_name}'")
-        if state:
-            filters.append(f"state '{state}'")
-        params = {"filter": " and ".join(filters)} if filters else None
+        params = _machine_filter_params(pool_id, machine_name, state)
         machines = client.get_all("/inventory/v1/machines", params=params, page_size=size, max_items=size)
         return [_machine_brief(m) for m in machines]
 

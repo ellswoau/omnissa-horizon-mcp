@@ -11,9 +11,17 @@ if TYPE_CHECKING:
 from ..client import get_client
 from ._common import lookup_user_session
 
+# /helpdesk/v1/... takes `session_id` (the inventory session id). The
+# /helpdesk/v2/... endpoints take `internal_session_id`, which is a different,
+# internal identifier and rejects an inventory session id.
+HELPDESK_HISTORICAL_PATH = "/helpdesk/v1/performance/historical-data"
+HELPDESK_PROCESS_PATH = "/helpdesk/v1/performance/process"
+HELPDESK_DISPLAY_PATH = "/helpdesk/v1/performance/display-protocol"
+HELPDESK_END_PROCESS_PATH = "/helpdesk/v1/performance/remote-process/action/end-remote-process"
+
 
 def _helpdesk(client, session_id: str, path: str, **extra) -> list:
-    params = {"internal_session_id": session_id}
+    params = {"session_id": session_id}
     params.update(extra)
     data = client.get_json(path, params=params)
     if data is None:
@@ -41,8 +49,8 @@ def _protocol_network(client, session_id: str) -> dict:
     Returns an empty dict if the endpoint is unavailable for the session."""
     try:
         data = client.get_json(
-            "/helpdesk/v2/performance/display-protocol",
-            params={"internal_session_id": session_id},
+            HELPDESK_DISPLAY_PATH,
+            params={"session_id": session_id},
         )
     except Exception:
         return {}
@@ -86,7 +94,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         (e.g. 'chrome')."""
         client = get_client(config)
         params = {"process_filter": process_filter} if process_filter else None
-        data = _helpdesk(client, session_id, "/helpdesk/v2/performance/process")
+        data = _helpdesk(client, session_id, HELPDESK_PROCESS_PATH)
         if process_filter:
             data = [p for p in data if process_filter.lower() in (p.get("name") or "").lower()]
         data.sort(key=lambda p: p.get("cpu", 0), reverse=True)
@@ -104,7 +112,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
             sid = s.get("id")
             if not sid:
                 continue
-            data = _helpdesk(client, sid, "/helpdesk/v2/performance/process")
+            data = _helpdesk(client, sid, HELPDESK_PROCESS_PATH)
             if process_filter:
                 data = [p for p in data if process_filter.lower() in (p.get("name") or "").lower()]
             result.append({
@@ -124,7 +132,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         network figures come from the display-protocol performance endpoint.
         Session id comes from find_user_session."""
         client = get_client(config)
-        data = _helpdesk(client, session_id, "/helpdesk/v2/performance/historical-data")
+        data = _helpdesk(client, session_id, HELPDESK_HISTORICAL_PATH)
         latest = data[-1] if data else {}
         return {
             "session_id": session_id,
@@ -154,7 +162,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
             sid = s.get("id")
             if not sid:
                 continue
-            data = _helpdesk(client, sid, "/helpdesk/v2/performance/historical-data")
+            data = _helpdesk(client, sid, HELPDESK_HISTORICAL_PATH)
             latest = data[-1] if data else {}
             result.append({
                 "session_id": sid,
@@ -192,7 +200,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         client = get_client(config)
         # Try to fill create_time_stamp from the process listing if omitted.
         if create_time_stamp is None:
-            procs = _helpdesk(client, session_id, "/helpdesk/v2/performance/process")
+            procs = _helpdesk(client, session_id, HELPDESK_PROCESS_PATH)
             for p in procs:
                 if p.get("process_id") == process_id:
                     create_time_stamp = p.get("create_time")
@@ -204,7 +212,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
             "create_time_stamp": int(create_time_stamp or 0),
         }
         client.post_json(
-            "/helpdesk/v1/performance/remote-process/action/end-remote-process",
+            HELPDESK_END_PROCESS_PATH,
             body,
             params={"session_id": session_id},
         )

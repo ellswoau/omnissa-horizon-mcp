@@ -12,7 +12,14 @@ if TYPE_CHECKING:
     from ..config import HorizonConfig
 
 from ..client import HorizonClient, get_client
-from ._common import lookup_user_session, summarize_session
+from ._common import (
+    SESSIONS_PATH,
+    build_filter,
+    contains_filter,
+    equals_filter,
+    lookup_user_session,
+    summarize_session,
+)
 
 
 def _require_session(client: HorizonClient, session_id: str) -> str:
@@ -21,6 +28,26 @@ def _require_session(client: HorizonClient, session_id: str) -> str:
     if not sid:
         raise ValueError("session_id must not be empty.")
     return sid
+
+
+def _session_filter_params(username: Optional[str], pool_id: Optional[str],
+                           session_state: Optional[str]) -> Optional[dict]:
+    """Build the ``filter`` query params for /inventory sessions listing.
+
+    Horizon expects a JSON filter object, not ``field 'value'``. ``user_name``
+    uses a Contains match (robust to ``DOMAIN\\user`` prefixes) while pool id
+    and state are exact Equals matches.
+    """
+    clauses = []
+    if username:
+        clauses.append(contains_filter("user_name", username))
+    if pool_id:
+        clauses.append(equals_filter("desktop_pool_id", pool_id))
+    if session_state:
+        clauses.append(equals_filter("session_state", session_state))
+    if not clauses:
+        return None
+    return {"filter": build_filter(clauses)}
 
 
 def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
@@ -45,15 +72,10 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         desktop pool id, or session state (e.g. CONNECTED / DISCONNECTED /
         PENDING). Returns compact session summaries."""
         client = get_client(config)
-        filters = []
-        if username:
-            filters.append(f"user_name '{username}'")
-        if pool_id:
-            filters.append(f"desktop_pool_id '{pool_id}'")
-        if session_state:
-            filters.append(f"session_state '{session_state}'")
-        params = {"filter": " and ".join(filters)} if filters else None
-        sessions = client.get_all("/inventory/v1/sessions", params=params, page_size=size, max_items=size)
+        # Sessions are listed from the versioned endpoint because the base
+        # /inventory/v1/sessions model has no filterable/displayable user_name.
+        params = _session_filter_params(username, pool_id, session_state)
+        sessions = client.get_all(SESSIONS_PATH, params=params, page_size=size, max_items=size)
         return [summarize_session(s) for s in sessions]
 
     @mcp.tool()

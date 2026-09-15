@@ -130,6 +130,34 @@ Result summary: `total_machines`, `total_in_use_sessions`, `total_errors`, plus
 per-pool `machines_by_state`, `in_use_sessions`, `available_estimate` and any
 cloning/state `errors`.
 
+## Horizon 2506 API notes
+
+A few Horizon REST details that this server handles explicitly (verified
+against the 2506 OpenAPI spec and the *Horizon Server REST Pagination, Filter
+and Sorting Guide*):
+
+- **Inventory filters use a JSON filter object**, not the `field 'value'`
+  string form. `list_sessions` / `list_machines` build e.g.
+  `{"type":"Equals","name":"desktop_pool_id","value":"…"}`, chained with an
+  `"And"` wrapper for multiple clauses. Field/operator choices: `user_name`
+  (Contains), `desktop_pool_id` (Equals), `session_state` (Equals) for
+  sessions; `name` (Contains), `desktop_pool_id` (Equals), `state` (Equals)
+  for machines.
+- **Sessions are listed from `/inventory/v7/sessions`** (not `v1`): the base
+  `SessionInfo` model returned by `/inventory/v1/sessions` has no `user_name`
+  field (only the raw `user_id` SID), so it cannot be filtered or displayed by
+  username. `user_name` is added from the versioned session models (v4+); v7 is
+  the current 2506 model. `find_user_session` therefore filters server-side on
+  `user_name` (Equals/Contains) and falls back to an unfiltered client-side
+  scan. If sessions are visible but none expose a `user_name`, the tool raises a
+  clear error about the likely missing service-account privilege instead of
+  silently reporting zero matches.
+- **Helpdesk performance calls use `/helpdesk/v1/...` with `session_id`**
+  (`historical-data`, `process`, `display-protocol`, and
+  `remote-process/action/end-remote-process`). The `/helpdesk/v2/...`
+  endpoints take `internal_session_id`, a different internal identifier that
+  rejects an inventory session id (`helpdesk.session.find.error`).
+
 ## Security notes
 
 - Passwords are never logged; `redacted()` masks them.

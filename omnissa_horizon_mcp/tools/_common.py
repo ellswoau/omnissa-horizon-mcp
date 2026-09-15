@@ -1,9 +1,91 @@
 """Shared helpers for tool implementations."""
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional
 
-from ..client import HorizonClient
+from ..client import HorizonClient, HorizonError
+
+#: Inventory endpoint used to list sessions.
+#:
+#: ``/inventory/v1/sessions`` returns the base ``SessionInfo`` model, which has
+#: NO ``user_name`` field (only the raw ``user_id`` SID), so it can neither be
+#: filtered nor displayed by username. The versioned session endpoints add
+#: ``user_name`` from v4 onwards (``Supported Filters: Equals, StartsWith,
+#: Contains``); v7 is the current 2506 model.
+SESSIONS_PATH = "/inventory/v7/sessions"
+
+
+def build_filter(clauses: List[Optional[Dict]]) -> Optional[str]:
+    """Build the Horizon ``filter`` query value from filter clauses.
+
+    Horizon expects a JSON filter object (which ``requests`` URL-encodes for
+    us), not the ``field 'value'`` string form::
+
+        {"type": "Equals", "name": "desktop_pool_id", "value": "<id>"}
+
+    A single clause is sent as-is; multiple clauses are combined with an
+    ``"And"`` chain, per the Horizon Server REST Pagination, Filter and Sorting
+    Guide. Returns ``None`` when there is nothing to filter.
+    """
+    clauses = [c for c in clauses if c]
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return json.dumps(clauses[0], separators=(",", ":"))
+    return json.dumps({"type": "And", "filters": clauses}, separators=(",", ":"))
+
+
+def equals_filter(name: str, value) -> Dict:
+    """A single-value ``Equals`` filter clause."""
+    return {"type": "Equals", "name": name, "value": value}
+
+
+def contains_filter(name: str, value) -> Dict:
+    """A ``Contains`` filter clause (substring match)."""
+    return {"type": "Contains", "name": name, "value": value}
+
+
+def _normalise_user(value: str) -> str:
+    """Normalise ``DOMAIN\\user`` / ``user@domain`` to ``domain/user`` lower."""
+    return (value or "").strip().lower().replace("\\", "/")
+
+
+def user_variants(username: str) -> set:
+    """Return the set of normalised username forms to match a session against.
+
+    Accepts ``user``, ``DOMAIN\\user`` and ``user@domain`` and yields the
+    equivalent slash/at forms plus the bare account name, because Horizon
+    reports ``user_name`` as ``DOMAIN\\user``.
+    """
+    base = _normalise_user(username)
+    if not base:
+        return set()
+    variants = {base}
+    if "/" in base:
+        domain, _, user = base.partition("/")
+        variants.add(user)
+        variants.add(f"{user}@{domain}")
+    elif "@" in base:
+        user, _, domain = base.partition("@")
+        variants.add(user)
+        variants.add(f"{domain}/{user}")
+    local = base.split("/")[-1].split("@")[0]
+    if local:
+        variants.add(local)
+    return {v for v in variants if v}
+
+
+def session_matches_user(session: Dict, variants: set) -> bool:
+    """True if a session's ``user_name`` matches any of ``variants``."""
+    key = _normalise_user(session.get("user_name"))
+    if not key or not variants:
+        return False
+    if key in variants:
+        return True
+    if key.split("/")[-1].split("@")[0] in variants:
+        return True
+    return any(key.endswith("/" + v) for v in variants)
 
 
 def lookup_user_session(
@@ -14,34 +96,69 @@ def lookup_user_session(
 ) -> List[Dict]:
     """Find sessions belonging to ``username``.
 
-    Horizon usernames may be ``user``, ``DOMAIN\\user`` or ``user@domain``.
-    The ``user_name`` cookie on a session is typically ``DOMAIN\\user``.
+    Horizon usernames may be ``user``, ``DOMAIN\\user`` or ``user@domain``, and
+    the ``user_name`` field is reported as ``DOMAIN\\user``. A server-side
+    filter on ``user_name`` is attempted first; if the server rejects it (or
+    returns nothing) the full session list is scanned client-side as a
+    fallback.
+
+    If sessions are visible but *none* of them expose a ``user_name``, a
+    :class:`HorizonError` is raised explaining the likely missing privilege
+    instead of silently reporting zero matches.
     """
-    needle = username.strip().lower().replace("\\", "/")
-    # Normalise a leading domain in the search.
-    if "\\" in username.strip():
-        needle = username.strip().lower()
-        needle = needle.replace("\\", "/")
-    else:
-        needle = username.strip().lower()
+    variants = user_variants(username)
+    if not variants:
+        return []
 
-    wanted = {needle}
-    if "/" in needle:
-        wanted.add(needle.split("/")[-1])
-    if "@" in needle:
-        wanted.add(needle.split("@")[0])
+    raw = (username or "").strip()
+    local = _normalise_user(username).split("/")[-1].split("@")[0]
 
-    sessions = client.get_all("/inventory/v1/sessions", page_size=200)
+    # Server-side attempts first: exact match on the value as supplied, then a
+    # contains match on the bare account name (handles DOMAIN\user prefixes).
+    attempts = [("Equals", raw)]
+    if local and local.lower() != raw.lower():
+        attempts.append(("Equals", local))
+    if local:
+        attempts.append(("Contains", local))
+
+    sessions: Optional[List[Dict]] = None
+    for op, value in attempts:
+        params = {"filter": build_filter([{"type": op, "name": "user_name", "value": value}])}
+        try:
+            rows = client.get_all(SESSIONS_PATH, params=params, page_size=200)
+        except HorizonError:
+            # Filter unsupported / rejected -- fall through to the next attempt.
+            continue
+        sessions = rows
+        if rows:
+            break
+
+    if not sessions:
+        # Unfiltered scan (also covers servers that reject the user_name
+        # filter outright).
+        sessions = client.get_all(SESSIONS_PATH, page_size=200)
+
+    if not sessions:
+        return []
+
+    if all(not s.get("user_name") for s in sessions):
+        raise HorizonError(
+            None,
+            "Horizon returned no 'user_name' for any of the "
+            f"{len(sessions)} visible session(s). This usually means the "
+            "service account lacks the privilege needed to resolve session "
+            "user names (e.g. MACHINE_VIEW on the session's access group). "
+            "Check the Connection Server role/privileges of the service "
+            "account.",
+        )
+
     matches = []
     for s in sessions:
-        user = (s.get("user_name") or "")
-        key = user.lower().replace("\\", "/")
-        if not key:
+        if not session_matches_user(s, variants):
             continue
-        if any(key == w or key.endswith("/" + w.lstrip("/")) for w in wanted):
-            if active_only and s.get("session_state") == "DISCONNECTED":
-                continue
-            matches.append(s)
+        if active_only and s.get("session_state") == "DISCONNECTED":
+            continue
+        matches.append(s)
     return matches
 
 
