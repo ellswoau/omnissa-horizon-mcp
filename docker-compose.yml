@@ -20,7 +20,12 @@ services:
     # self-signed/test certificate that the container does not trust.
     environment:
       HORIZON_CONFIG_FILE: /config/horizon.json
+      # Set HORIZON_VERIFY_SSL=false only if your Connection Server uses a
+      # self-signed/test certificate that the container does not trust.
       # HORIZON_VERIFY_SSL: "false"
+      # Require a bearer token on the MCP endpoints (see /health for the
+      # credential-free health check). Generate with: `openssl rand -hex 32`.
+      HORIZON_MCP_AUTH_TOKEN: ${HORIZON_MCP_AUTH_TOKEN:?set this to a strong random value}
     volumes:
       # Mount a config file written by `config init` (0600). The container runs
       # as a non-root user; set HORIZON_VERIFY_SSL and file perms accordingly.

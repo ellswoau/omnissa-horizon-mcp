@@ -11,13 +11,70 @@ from HORIZON_* env vars or a JSON config file written by `config init`.
 from __future__ import annotations
 
 import argparse
+import hmac
+import json
+import os
 import sys
 import time
 
 from . import __version__
 from .client import clear_client, get_client
-from .config import ConfigError, configure_interactive, load_config
+from .config import ENV_MCP_TOKEN, ConfigError, configure_interactive, load_config
 from .tools import register_all
+
+
+# Paths exempt from bearer-token auth so external health monitors can probe the
+# daemon without credentials.
+_PUBLIC_PATHS = ("/health", "/healthz")
+
+
+class _BearerAuthMiddleware:
+    """Pure-ASGI middleware that requires ``Authorization: Bearer <token>`` on
+    all HTTP requests except the public health paths. Uses constant-time
+    comparison to avoid timing attacks. Passed to FastMCP as a Starlette
+    ``Middleware`` spec: (class, args, kwargs)."""
+
+    def __init__(self, app, allowed_token: str = "", public_paths=_PUBLIC_PATHS):
+        self.app = app
+        self.allowed_token = allowed_token
+        self.public_paths = public_paths
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        if any(path == p or path.startswith(p + "/") for p in self.public_paths):
+            return await self.app(scope, receive, send)
+
+        auth = ""
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                auth = value.decode("latin-1")
+                break
+        expected = "Bearer " + self.allowed_token
+        if not hmac.compare_digest(auth, expected):
+            body = json.dumps({"detail": "Not authenticated"}).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", b'Bearer realm="mcp"'),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+        return await self.app(scope, receive, send)
+
+
+def _auth_middleware_spec(allowed_token: str):
+    """Return a Starlette Middleware spec tuple for FastMCP's ``middleware``
+    argument, or None when no token is configured."""
+    if not allowed_token:
+        return None
+    return (_BearerAuthMiddleware, (), {"allowed_token": allowed_token})
 
 
 def build_server(config=None):
@@ -112,6 +169,8 @@ def main(argv=None) -> int:
                         help="MCP transport for the default run mode (default: stdio)")
     parser.add_argument("--host", default=None, help="Bind host for http/sse transports")
     parser.add_argument("--port", type=int, default=8000, help="Bind port for http/sse transports")
+    parser.add_argument("--token", default=None,
+                        help="Bearer token that gates the network transport (default: $%s)" % ENV_MCP_TOKEN)
     sub = parser.add_subparsers(dest="command")
 
     # CLI secret/config wizard: `config init --config <file>`
@@ -142,7 +201,14 @@ def main(argv=None) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
     if args.transport in ("http", "sse", "streamable-http"):
-        mcp.run(transport=args.transport, host=args.host or "0.0.0.0", port=args.port)
+        auth_token = args.token if args.token is not None else os.environ.get(ENV_MCP_TOKEN, "").strip()
+        mw = _auth_middleware_spec(auth_token)
+        mcp.run(
+            transport=args.transport,
+            host=args.host or "0.0.0.0",
+            port=args.port,
+            middleware=[mw] if mw else None,
+        )
     else:
         mcp.run(transport="stdio")
 

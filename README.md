@@ -234,6 +234,41 @@ login is exposed at `/health` (alias `/healthz`) whenever the daemon transport
 The Docker `HEALTHCHECK` and the bundled `docker-compose.yml` healthcheck both
 hit `/health` automatically.
 
+## Authentication (bearer token)
+
+The network transport is gated behind a **bearer token** when configured. With
+a token set, every endpoint except `/health` and `/healthz` requires
+`Authorization: Bearer <token>` and returns `401` otherwise.
+
+Set it via the env var `HORIZON_MCP_AUTH_TOKEN` or the `--token` flag. Generate
+a strong one:
+
+```bash
+export HORIZON_MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+```
+
+```bash
+docker run -d --name horizon-mcp -p 8000:8000 \
+  -e HORIZON_CONFIG_FILE=/config/horizon.json \
+  -e HORIZON_MCP_AUTH_TOKEN="$HORIZON_MCP_AUTH_TOKEN" \
+  -v "$(pwd)/horizon.json:/config/horizon.json:ro" \
+  omnissa-horizon-mcp --transport http --host 0.0.0.0 --port 8000
+```
+
+Clients must then send the header on every request:
+```bash
+curl -H "Authorization: Bearer $HORIZON_MCP_AUTH_TOKEN" http://host:8000/mcp
+```
+
+Notes:
+- When `HORIZON_MCP_AUTH_TOKEN` is unset/empty, auth is **disabled** (open),
+  preserving the default behaviour. The bundled `docker-compose.yml` *requires*
+  the variable so daemon deployments are secured by default.
+- If the token is ever compromised, rotate it and redeploy — the running
+  process does not cache it across restarts.
+- `/health` stays public so load balancers / uptime monitors can probe liveness
+  without a secret.
+
 ## Project layout
 
 ```
