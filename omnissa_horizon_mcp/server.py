@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from . import __version__
 from .client import clear_client, get_client
@@ -47,6 +48,27 @@ def build_server(config=None):
         is connected to (server, service account, ssl/timeout). Never includes
         the password."""
         return config.redacted()
+
+    _started_at = time.time()
+    _health_body = {
+        "status": "ok",
+        "service": "omnissa-horizon-mcp",
+        "version": __version__,
+    }
+
+    # HTTP health endpoint(s) for the daemon transport (http/sse/streamable-http).
+    # Lets load balancers / monitors / the Docker HEALTHCHECK get a fast 200
+    # without performing a blocking login to Horizon.
+    async def _health_response(request):  # noqa: ANN001 - Starlette Request
+        from starlette.responses import JSONResponse
+
+        body = dict(_health_body)
+        body["uptime_seconds"] = int(time.time() - _started_at)
+        body["healthy"] = True
+        return JSONResponse(body)
+
+    mcp.custom_route("/health", methods=["GET"], name="health")(_health_response)
+    mcp.custom_route("/healthz", methods=["GET"], name="healthz")(_health_response)
 
     return mcp
 

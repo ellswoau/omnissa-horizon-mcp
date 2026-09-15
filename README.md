@@ -218,8 +218,21 @@ Then connect an MCP client that supports HTTP/SSE to
 ### Verify the daemon is up
 
 ```bash
-curl -i http://localhost:8000/mcp        # expect a JSON-RPC "missing session ID" response
+curl -i http://localhost:8000/health        # HTTP 200 + JSON status
+curl -i http://localhost:8000/healthz       # alias
+curl -i http://localhost:8000/mcp           # expect JSON-RPC "missing session ID"
 ```
+
+A health check that requires **no Horizon credentials** and does not block on a
+login is exposed at `/health` (alias `/healthz`) whenever the daemon transport
+(`http` / `sse` / `streamable-http`) is running:
+
+```json
+{"status":"ok","service":"omnissa-horizon-mcp","version":"0.1.0","uptime_seconds":123,"healthy":true}
+```
+
+The Docker `HEALTHCHECK` and the bundled `docker-compose.yml` healthcheck both
+hit `/health` automatically.
 
 ## Project layout
 

@@ -31,7 +31,7 @@ EXPOSE 8000
 ENTRYPOINT ["python", "-m", "omnissa_horizon_mcp"]
 CMD []
 
-# Healthcheck: a lightweight TCP probe of the entrypoint (best-effort; only
-# meaningful when running with --transport http/sse). Located on the default port.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import socket,sys; s=socket.create_connection(('127.0.0.1', %d), 6); s.close()" % 8000 || exit 1
+# Healthcheck: succeeds only when the daemon is listening and /health returns
+# HTTP 200 (matters for the http/sse daemon modes; harmless otherwise).
+HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:' + __import__('os').environ.get('HORIZON_PORT','8000') + '/health', timeout=6)" || exit 1
