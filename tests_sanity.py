@@ -454,6 +454,13 @@ class SiteResolutionTest(unittest.TestCase):
         self.assertEqual(r["sites"][0]["password"], "***REDACTED***")
         self.assertNotIn("SECRET", json.dumps(r))
 
+    def test_site_inherits_pool_image_filters(self):
+        from omnissa_horizon_mcp.config import resolve_site
+        cfg = self.base_cfg()
+        cfg.pool_image_filters = [{"pool": "bos1", "require": "1GB"}]
+        self.assertEqual(resolve_site(cfg, "secondary").pool_image_filters,
+                         [{"pool": "bos1", "require": "1GB"}])
+
 
 class PoolAdminToolsTest(unittest.TestCase):
     """Pool enable/provisioning + snapshot-rollback tools."""
@@ -613,6 +620,68 @@ class PoolAdminToolsTest(unittest.TestCase):
         out = tools["rollback_desktop_pool_image"](pool_name="tl1-vdi")
         self.assertEqual(out["status"], "cannot_determine_previous_image")
         self.assertTrue(out["warnings"])
+
+    # -- shared-golden-image snapshot-name filter (bos1 -> 1GB, bos2 -> 2GB) --
+    def _bos_route(self):
+        snaps = [
+            {"id": "snap-2gb", "name": "Browser Updates 2GB",
+             "path": "/Browser Updates 2GB", "created_timestamp": 1000},
+            {"id": "snap-1gb", "name": "Browser Updates 1GB - ACTUALLY",
+             "path": "/Browser Updates 2GB/Browser Updates 1GB - ACTUALLY",
+             "created_timestamp": 2000},
+            {"id": "snap-2gb2", "name": "Officeconnect Update 2GB",
+             "path": "/Browser Updates 2GB/Browser Updates 1GB - ACTUALLY/Officeconnect Update 2GB",
+             "created_timestamp": 3000},
+        ]
+
+        def route(path, params=None, **kw):
+            if path == "/external/v1/base-vms":
+                return [{"id": "vm-1", "path": "/dc/vm/BOS"}]
+            if path == "/external/v1/base-snapshots":
+                return snaps
+            return []
+        return route
+
+    def _bos_pool(self, name, cur_snap):
+        return {"id": "p1", "name": name, "vcenter_id": "vc1",
+                "provisioning_settings": {"parent_vm_id": "vm-1", "base_snapshot_id": cur_snap}}
+
+    def test_snapshot_allowed_ignores_parent_path(self):
+        from omnissa_horizon_mcp.tools import pool_tools as pt
+        snap = {"name": "Browser Updates 1GB - ACTUALLY",
+                "path": "/Browser Updates 2GB/Browser Updates 1GB - ACTUALLY"}
+        self.assertTrue(pt._snapshot_allowed(snap, ["1GB"]))
+        # "2GB" only appears in the parent path -> must NOT satisfy a 2GB rule.
+        self.assertFalse(pt._snapshot_allowed(snap, ["2GB"]))
+
+    def test_chronology_filter_keeps_pool_family(self):
+        from omnissa_horizon_mcp.tools import pool_tools as pt
+        client = mock.MagicMock()
+        client.get_all = self._bos_route()
+        # bos2 is on the newest 2GB snapshot; the previous 2GB one is snap-2gb.
+        sel = pt._select_previous_image(client, self._bos_pool("bos2-vdi", "snap-2gb2"),
+                                        [], [{"pool": "bos2", "require": "2GB"}])
+        self.assertEqual(sel["selection_basis"], "snapshot_chronology")
+        self.assertEqual(sel["target"]["snapshot_id"], "snap-2gb")
+        self.assertEqual(sel["image_filter"], ["2GB"])
+
+    def test_chronology_filter_excludes_other_family(self):
+        from omnissa_horizon_mcp.tools import pool_tools as pt
+        client = mock.MagicMock()
+        client.get_all = self._bos_route()
+        # bos1 is on a 1GB snapshot; the only earlier one is 2GB -> no target.
+        sel = pt._select_previous_image(client, self._bos_pool("bos1-vdi", "snap-1gb"),
+                                        [], [{"pool": "bos1", "require": "1GB"}])
+        self.assertIsNone(sel["target"])
+        self.assertTrue(any("requirement" in w for w in sel["warnings"]))
+
+    def test_chronology_without_filter_can_pick_wrong_family(self):
+        from omnissa_horizon_mcp.tools import pool_tools as pt
+        client = mock.MagicMock()
+        client.get_all = self._bos_route()
+        sel = pt._select_previous_image(client, self._bos_pool("bos2-vdi", "snap-2gb2"), [])
+        # Without a filter the naive "most recent older" is the 1GB snapshot.
+        self.assertEqual(sel["target"]["snapshot_id"], "snap-1gb")
 
 
 if __name__ == "__main__":

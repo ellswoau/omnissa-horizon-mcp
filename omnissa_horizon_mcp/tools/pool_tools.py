@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from collections import Counter, defaultdict
 
 from ..client import HorizonClient, HorizonError, get_client
+from ..config import resolve_site
 from ._common import site_client, site_clients
 
 POOLS_PATH = "/inventory/v1/desktop-pools"
@@ -266,6 +267,45 @@ def _base_snapshots(client, vcenter_id, base_vm_id) -> list:
                           params={"vcenter_id": vcenter_id, "base_vm_id": base_vm_id})
 
 
+def _pool_image_requirement(image_filters, pool_name: str) -> list:
+    """Return the snapshot-name substrings required for ``pool_name``.
+
+    A rule's ``pool`` is matched as a case-insensitive regex against the pool
+    name (plain substrings work too); its ``require`` is the text a candidate
+    snapshot's *name* must contain. This keeps pools that share one golden image
+    rolling back within their own snapshot family (e.g. bos1 -> 1GB, bos2 ->
+    2GB).
+    """
+    reqs = []
+    for f in image_filters or []:
+        pat = str((f or {}).get("pool") or "")
+        if not pat:
+            continue
+        try:
+            hit = re.search(pat, pool_name or "", re.I) is not None
+        except re.error:
+            hit = pat.lower() in (pool_name or "").lower()
+        if not hit:
+            continue
+        req = f.get("require") or f.get("name_contains")
+        if req:
+            reqs.append(str(req))
+    return reqs
+
+
+def _snapshot_allowed(snap: dict, requires: list) -> bool:
+    """True if a snapshot satisfies the pool's name requirement (if any).
+
+    Matches the snapshot *name* only -- never the full path, whose parent chain
+    can contain the other pool's token (e.g. '/... 2GB/... 1GB').
+    """
+    if not requires:
+        return True
+    name = snap.get("name") or (snap.get("path") or "").rstrip("/").split("/")[-1]
+    text = str(name).lower()
+    return any(r.lower() in text for r in requires)
+
+
 def _build_history(client, pool_id: str) -> list:
     """PUSH_IMAGE history (newest first) with parsed image paths."""
     hist = []
@@ -288,14 +328,17 @@ def _build_history(client, pool_id: str) -> list:
     return hist
 
 
-def _select_previous_image(client, pool: dict, history: list) -> dict:
+def _select_previous_image(client, pool: dict, history: list, image_filters=None) -> dict:
     """Decide which previously-applied image to roll back to.
 
     Primary source is the pool's push history (the most recent distinct pushed
     image that is not the current one). If that image no longer exists on the
     golden image (its snapshot was deleted), fall back to the golden image's
     snapshot chronology -- the snapshot created immediately before the pool's
-    current snapshot. Returns the resolved target ids plus how it was chosen.
+    current snapshot. ``image_filters`` (config ``pool_image_filters``) restricts
+    candidates by snapshot name so pools that share one golden image stay in
+    their own family (e.g. bos1 -> 1GB, bos2 -> 2GB). Returns the resolved
+    target ids plus how it was chosen.
     """
     ps = pool.get("provisioning_settings") or {}
     vc = pool.get("vcenter_id")
@@ -307,6 +350,7 @@ def _select_previous_image(client, pool: dict, history: list) -> dict:
     warnings = []
     previous = None
     basis = None
+    requires = _pool_image_requirement(image_filters, pool.get("name"))
 
     # 1) Push history first (what the pool was told to push, newest first).
     target_path = None
@@ -325,7 +369,14 @@ def _select_previous_image(client, pool: dict, history: list) -> dict:
         bv = _resolve_base_vm(client, vc, vm_path=vm_path)
         snap = _resolve_base_snapshot(client, vc, bv["id"], snap_path=snap_path) if bv else None
         if bv and snap:
-            previous = {"parent_vm_id": bv["id"], "snapshot_id": snap["id"], "path": target_path}
+            if _snapshot_allowed(snap, requires):
+                previous = {"parent_vm_id": bv["id"], "snapshot_id": snap["id"], "path": target_path}
+            else:
+                warnings.append(
+                    "The push-history image %r does not match this pool's image "
+                    "requirement %s; ignoring it and falling back to snapshot "
+                    "chronology." % (target_path, requires))
+                basis = None
         else:
             warnings.append(
                 "The image named in the push history no longer exists on the "
@@ -348,6 +399,14 @@ def _select_previous_image(client, pool: dict, history: list) -> dict:
         else:
             older = [s for s in snaps
                      if (s.get("created_timestamp") or 0) < (cur.get("created_timestamp") or 0)]
+            if requires:
+                kept = [s for s in older if _snapshot_allowed(s, requires)]
+                if len(kept) != len(older):
+                    warnings.append(
+                        "Filtered the golden-image snapshot chronology by this pool's "
+                        "image requirement %s (kept %d of %d earlier snapshots)."
+                        % (requires, len(kept), len(older)))
+                older = kept
             older.sort(key=lambda s: s.get("created_timestamp") or 0)
             if older:
                 prev = older[-1]
@@ -358,7 +417,11 @@ def _select_previous_image(client, pool: dict, history: list) -> dict:
                 }
                 basis = "snapshot_chronology"
             else:
-                warnings.append("No earlier snapshot exists on the golden image to roll back to.")
+                warnings.append(
+                    "No earlier snapshot matching this pool's image requirement "
+                    "exists on the golden image to roll back to."
+                    if requires else
+                    "No earlier snapshot exists on the golden image to roll back to.")
 
     if previous is None:
         warnings.append("Pass snapshot_id (and parent_vm_id) explicitly to choose the target image.")
@@ -369,6 +432,7 @@ def _select_previous_image(client, pool: dict, history: list) -> dict:
         "distinct_images": distinct,
         "target": previous,
         "selection_basis": basis,
+        "image_filter": requires,
         "warnings": warnings,
     }
 
@@ -518,6 +582,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         snapshot chosen from history.
         """
         name, client = site_client(config, site)
+        image_filters = resolve_site(config, site).pool_image_filters
         pool = _resolve_pool(client, pool_id=pool_id, pool_name=pool_name)
         if not pool:
             return {"site": name, "status": "no matching pool", "pool_id": pool_id, "pool_name": pool_name}
@@ -538,7 +603,7 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
             selection_basis = "explicit"
             warnings = []
         else:
-            sel = _select_previous_image(client, detail, history)
+            sel = _select_previous_image(client, detail, history, image_filters)
             warnings = list(sel["warnings"])
             selection_basis = sel["selection_basis"]
             tgt = sel["target"]

@@ -213,6 +213,24 @@ and Sorting Guide*):
    snapshot created immediately before the pool's current snapshot.
 4. Re-push it via `POST /inventory/v1/desktop-pools/{id}/action/schedule-push-image`.
 
+**Shared golden images (`pool_image_filters`).** When several pools share one
+golden image but each must use its own snapshot family (e.g. `bos1` uses the
+`1GB` snapshots, `bos2` the `2GB` ones), add per-pool rules so the fallback
+can't cross over. A rule applies when its `pool` regex matches the pool name;
+a candidate snapshot is accepted only when its **name** contains the `require`
+text (the parent path is deliberately not matched, since it can contain the
+other pool's token):
+
+```json
+"pool_image_filters": [
+  {"pool": "bos1", "require": "1GB"},
+  {"pool": "bos2", "require": "2GB"}
+]
+```
+
+(Pools matching no rule are unrestricted. `HORIZON_POOL_IMAGE_FILTERS` sets the
+same list via env.)
+
 The endpoint does **not** accept a compute profile, so the pool's current
 vCPUs / cores-per-socket / RAM are preserved. The tool returns the resolved
 plan (current image, target image, compute profile, request body and how the

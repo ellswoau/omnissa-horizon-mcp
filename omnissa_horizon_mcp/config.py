@@ -29,6 +29,12 @@ ENV_TIMEOUT = "HORIZON_TIMEOUT"
 # {"name": "secondary", "base_url": "https://cloud-b.example.com",
 #  "role": "secondary", "username"/"password"/"domain"/"verify_ssl"/"timeout"}
 ENV_SITES = "HORIZON_SITES"
+# Optional JSON array of per-pool snapshot-name filters for the image-rollback
+# fallback, e.g. [{"pool": "bos1", "require": "1GB"}, {"pool": "bos2", "require": "2GB"}].
+# A rule applies when its ``pool`` regex matches the pool name; a candidate
+# snapshot is accepted only when its name contains the ``require`` text. Keeps
+# pools that share one golden image from rolling back to another pool's image.
+ENV_POOL_IMAGE_FILTERS = "HORIZON_POOL_IMAGE_FILTERS"
 # Optional bearer token that gates the network MCP endpoints when set.
 ENV_MCP_TOKEN = "HORIZON_MCP_AUTH_TOKEN"
 
@@ -55,6 +61,8 @@ class HorizonConfig:
     # Extra connection servers (multi-site / DR). Raw definitions; each entry
     # overrides the top-level credentials only where it sets them.
     sites: List[Dict[str, Any]] = field(default_factory=list)
+    # Per-pool snapshot-name filters for the image-rollback fallback.
+    pool_image_filters: List[Dict[str, Any]] = field(default_factory=list)
 
     def redacted(self) -> dict:
         """Return a dict safe for logging (password redacted)."""
@@ -106,6 +114,8 @@ def load_config(
                 setattr(cfg, key, data[key])
         if isinstance(data.get("sites"), list):
             cfg.sites = data["sites"]
+        if isinstance(data.get("pool_image_filters"), list):
+            cfg.pool_image_filters = data["pool_image_filters"]
         for key in ("site_name", "site_role"):
             if data.get(key):
                 setattr(cfg, key, str(data[key]))
@@ -133,6 +143,13 @@ def load_config(
             parsed = json.loads(os.environ[ENV_SITES])
             if isinstance(parsed, list):
                 cfg.sites = parsed
+        except json.JSONDecodeError:
+            pass
+    if os.environ.get(ENV_POOL_IMAGE_FILTERS):
+        try:
+            parsed = json.loads(os.environ[ENV_POOL_IMAGE_FILTERS])
+            if isinstance(parsed, list):
+                cfg.pool_image_filters = parsed
         except json.JSONDecodeError:
             pass
 
@@ -217,6 +234,7 @@ def _site_to_config(base: "HorizonConfig", site: Dict[str, Any]) -> "HorizonConf
         timeout=int(site.get("timeout") or base.timeout),
         site_name=name,
         site_role=str(site.get("role") or "site"),
+        pool_image_filters=base.pool_image_filters,
     )
 
 
