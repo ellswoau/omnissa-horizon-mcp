@@ -31,6 +31,15 @@ https://developer.omnissa.com/horizon-apis/horizon-server/versions/2506/.
   `exit-maintenance` machine
 - `monitor_connection_servers` / `monitor_gateways` / `monitor_farms` /
   `monitor_rds_servers` / `monitor_ad_domains` / `monitor_event_database`
+- `enable_desktop_pool` / `disable_desktop_pool` — re-enable (or disable) a
+  pool and its provisioning after it was stopped by errors / before maintenance
+- `desktop_pool_push_history` — recent golden-image PUSH_IMAGE tasks per pool
+- `rollback_desktop_pool_image` — re-push the *previous* golden-image snapshot
+  to a pool to roll back a bad update, keeping the pool's current compute
+  profile. Defaults to a dry run (`confirm=True` to schedule)
+- `list_sites` — the configured connection servers (primary + DR); every tool
+  accepts an optional `site` argument (`primary` / `secondary` / `dr` / a site
+  name, and `all` on read-only tools)
 - `horizon_ping` / `horizon_config_summary` — connectivity & config
 
 The MCP exposes the most common support/helpdesk actions so an assistant can
@@ -83,6 +92,39 @@ export HORIZON_CONFIG_FILE="./horizon.json"
 
 A `.env` file is also honored if `python-dotenv` is installed and loaded (see
 `.env.example`). See `omnissa_horizon_mcp/config.py` for all `HORIZON_*` vars.
+
+### Multiple connection servers (primary + DR site)
+
+The environment may span more than one Horizon Connection Server (e.g. a
+primary datacenter plus a DR site). Add a `sites` list to the config file, or
+set `HORIZON_SITES` to the same JSON array. Each entry may override the
+top-level credentials; anything it omits is inherited.
+
+```json
+{
+  "base_url": "https://cloud.wellertruck.com",
+  "domain": "WELLER",
+  "username": "horizonaiagent",
+  "password": "…",
+  "verify_ssl": true,
+  "sites": [
+    {"name": "primary",   "base_url": "https://cloud.wellertruck.com",   "role": "primary"},
+    {"name": "secondary", "base_url": "https://cloud-b.wellertruck.com", "role": "secondary"}
+  ]
+}
+```
+
+Every tool then accepts an optional `site` argument:
+
+* omitted / `primary` -> the default (`base_url`) connection server
+* `secondary` / `dr` -> the DR site
+* a configured `name` -> that site
+* `all` -> read-only listing/monitoring tools query every site (a dict keyed
+  by site name)
+
+`list_sites` shows the configured sites. Each site keeps its **own** inventory
+and golden images, so pool/snapshot/rollback lookups always resolve against
+the selected site.
 
 ### Verify credentials before connecting to an MCP client
 
@@ -157,6 +199,27 @@ and Sorting Guide*):
   `remote-process/action/end-remote-process`). The `/helpdesk/v2/...`
   endpoints take `internal_session_id`, a different internal identifier that
   rejects an inventory session id (`helpdesk.session.find.error`).
+
+## How `rollback_desktop_pool_image` chooses the snapshot
+
+1. Resolve the pool by name/id and read its v7 `provisioning_settings`:
+   current `parent_vm_id` + `base_snapshot_id`, and the **compute profile**
+   (`compute_profile_num_cpus`, `compute_profile_num_cores_per_socket`,
+   `compute_profile_ram_mb`).
+2. Read the pool's push history (`/inventory/v1/desktop-pools/{id}/tasks`) and
+   pick the most recent distinct pushed image that is not the current one.
+3. If that image no longer exists on the golden image (its snapshot was
+   deleted), fall back to the golden image's snapshot chronology -- the
+   snapshot created immediately before the pool's current snapshot.
+4. Re-push it via `POST /inventory/v1/desktop-pools/{id}/action/schedule-push-image`.
+
+The endpoint does **not** accept a compute profile, so the pool's current
+vCPUs / cores-per-socket / RAM are preserved. The tool returns the resolved
+plan (current image, target image, compute profile, request body and how the
+target was chosen) and only schedules the push when `confirm=True`.
+
+> Pushing an image is a maintenance operation: existing sessions are logged off
+> (per `logoff_policy`) and the pool is rebuilt. Confirm the target first.
 
 ## Security notes
 

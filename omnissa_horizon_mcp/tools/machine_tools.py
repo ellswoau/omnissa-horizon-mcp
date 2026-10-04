@@ -1,15 +1,18 @@
 """Machine-level tools: list machines and issue power operations
-(restart / reset / shutdown) directly against machine ids."""
+(restart / reset / shutdown) directly against machine ids.
+
+Read-only listing accepts ``site`` (and ``site='all'``); machine actions take a
+single ``site``.
+"""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
     from ..config import HorizonConfig
 
-from ..client import get_client
-from ._common import build_filter, contains_filter, equals_filter
+from ._common import build_filter, contains_filter, equals_filter, site_client, site_clients
 
 
 def _machine_brief(m: dict) -> dict:
@@ -46,53 +49,65 @@ def _machine_filter_params(pool_id: Optional[str], machine_name: Optional[str],
     return {"filter": build_filter(clauses)}
 
 
+def _machine_action(client, path: str, machine_id: str, action: str) -> dict:
+    client.post_json(path, [machine_id])
+    return {"action": action, "machine_ids": [machine_id], "status": "submitted"}
+
+
 def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
     @mcp.tool()
     def list_machines(pool_id: Optional[str] = None, machine_name: Optional[str] = None,
-                      state: Optional[str] = None, size: int = 200) -> list:
-        """List VDI machines (desktops) in the environment. Optionally filter by
-        desktop pool id, machine name substring, or machine state (e.g. AVAILABLE
-        / CONNECTED / ERROR). Returns id, name, dns, state and assigned users."""
-        client = get_client(config)
+                      state: Optional[str] = None, size: int = 200,
+                      site: Optional[str] = None) -> Union[list, dict]:
+        """List VDI machines (desktops). Optionally filter by desktop pool id,
+        machine name substring, or machine state (e.g. AVAILABLE / CONNECTED /
+        ERROR). ``site='all'`` returns a dict keyed by site name."""
         params = _machine_filter_params(pool_id, machine_name, state)
-        machines = client.get_all("/inventory/v1/machines", params=params, page_size=size, max_items=size)
-        return [_machine_brief(m) for m in machines]
+
+        def _fetch(client):
+            return [_machine_brief(m) for m in client.get_all(
+                "/inventory/v1/machines", params=params, page_size=size, max_items=size)]
+
+        if (site or "").strip().lower() == "all":
+            return {name: _fetch(client) for name, client in site_clients(config, "all")}
+        _, client = site_client(config, site)
+        return _fetch(client)
 
     @mcp.tool()
-    def restart_machine(machine_id: str) -> dict:
+    def restart_machine(machine_id: str, site: Optional[str] = None) -> dict:
         """Restart (graceful reboot) a specific machine by its id. Use when you
         already know the machine id (from list_machines)."""
-        client = get_client(config)
-        client.post_json("/inventory/v1/machines/action/restart", [machine_id])
-        return {"action": "restart-machine", "machine_ids": [machine_id], "status": "submitted"}
+        _, client = site_client(config, site)
+        return _machine_action(client, "/inventory/v1/machines/action/restart",
+                               machine_id, "restart-machine")
 
     @mcp.tool()
-    def reset_machine(machine_id: str) -> dict:
+    def reset_machine(machine_id: str, site: Optional[str] = None) -> dict:
         """Hard-reset (power-cycle, like unplugging/replugging) a specific
         machine by id. More forceful than restart; unsaved data is lost."""
-        client = get_client(config)
-        client.post_json("/inventory/v1/machines/action/reset", [machine_id])
-        return {"action": "reset-machine", "machine_ids": [machine_id], "status": "submitted"}
+        _, client = site_client(config, site)
+        return _machine_action(client, "/inventory/v1/machines/action/reset",
+                               machine_id, "reset-machine")
 
     @mcp.tool()
-    def shutdown_machine(machine_id: str) -> dict:
+    def shutdown_machine(machine_id: str, site: Optional[str] = None) -> dict:
         """Gracefully shut down a specific machine by its id (VM power off)."""
-        client = get_client(config)
-        client.post_json("/inventory/v1/machines/action/shutdown", [machine_id])
-        return {"action": "shutdown-machine", "machine_ids": [machine_id], "status": "submitted"}
+        _, client = site_client(config, site)
+        return _machine_action(client, "/inventory/v1/machines/action/shutdown",
+                               machine_id, "shutdown-machine")
 
     @mcp.tool()
-    def enter_maintenance_machine(machine_id: str) -> dict:
+    def enter_maintenance_machine(machine_id: str, site: Optional[str] = None) -> dict:
         """Put a specific machine into maintenance mode, taking it out of the
         pool for service."""
-        client = get_client(config)
-        client.post_json("/inventory/v1/machines/action/enter-maintenance", [machine_id])
-        return {"action": "enter-maintenance", "machine_ids": [machine_id], "status": "submitted"}
+        _, client = site_client(config, site)
+        return _machine_action(client, "/inventory/v1/machines/action/enter-maintenance",
+                               machine_id, "enter-maintenance")
 
     @mcp.tool()
-    def exit_maintenance_machine(machine_id: str) -> dict:
+    def exit_maintenance_machine(machine_id: str, site: Optional[str] = None) -> dict:
         """Take a specific machine out of maintenance mode, returning it to the
         pool."""
-        client = get_client(config)
-        client.post_json("/inventory/v1/machines/action/exit-maintenance", [machine_id])
-        return {"action": "exit-maintenance", "machine_ids": [machine_id], "status": "submitted"}
+        _, client = site_client(config, site)
+        return _machine_action(client, "/inventory/v1/machines/action/exit-maintenance",
+                               machine_id, "exit-maintenance")

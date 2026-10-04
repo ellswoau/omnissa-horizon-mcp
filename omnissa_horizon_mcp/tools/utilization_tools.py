@@ -8,8 +8,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
     from ..config import HorizonConfig
 
-from ..client import get_client
-from ._common import lookup_user_session
+from ._common import lookup_user_session, site_client
 
 # /helpdesk/v1/... takes `session_id` (the inventory session id). The
 # /helpdesk/v2/... endpoints take `internal_session_id`, which is a different,
@@ -87,12 +86,13 @@ def _protocol_network(client, session_id: str) -> dict:
 
 def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
     @mcp.tool()
-    def session_processes(session_id: str, process_filter: Optional[str] = None) -> dict:
+    def session_processes(session_id: str, process_filter: Optional[str] = None,
+                          site: Optional[str] = None) -> dict:
         """List running processes in a user's desktop session along with their
         CPU, memory and disk utilization (%). Session id comes from
         find_user_session. Optionally filter by a substring of the process name
         (e.g. 'chrome')."""
-        client = get_client(config)
+        _, client = site_client(config, site)
         params = {"process_filter": process_filter} if process_filter else None
         data = _helpdesk(client, session_id, HELPDESK_PROCESS_PATH)
         if process_filter:
@@ -101,11 +101,12 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         return {"session_id": session_id, "process_count": len(data), "processes": [_describe_process(p) for p in data]}
 
     @mcp.tool()
-    def user_processes(username: str, process_filter: Optional[str] = None) -> dict:
+    def user_processes(username: str, process_filter: Optional[str] = None,
+                       site: Optional[str] = None) -> dict:
         """List processes + CPU/memory for a given user's desktop. Resolves the
         user's active session(s) and reports per-session processes. This covers
         the 'list processes, cpu and memory of a target user' use case."""
-        client = get_client(config)
+        _, client = site_client(config, site)
         sessions = lookup_user_session(client, username, active_only=False)
         result = []
         for s in sessions:
@@ -125,13 +126,13 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         return {"username": username, "sessions": result}
 
     @mcp.tool()
-    def session_utilization(session_id: str) -> dict:
+    def session_utilization(session_id: str, site: Optional[str] = None) -> dict:
         """Report a desktop's CPU/memory utilization (plus disk IOPS/latency)
         AND network performance (estimated bandwidth, latency, packet loss) for
         a user session. CPU/mem come from historical-data (last ~15 min);
         network figures come from the display-protocol performance endpoint.
         Session id comes from find_user_session."""
-        client = get_client(config)
+        _, client = site_client(config, site)
         data = _helpdesk(client, session_id, HELPDESK_HISTORICAL_PATH)
         latest = data[-1] if data else {}
         return {
@@ -150,12 +151,12 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         }
 
     @mcp.tool()
-    def user_cpu_memory(username: str) -> dict:
+    def user_cpu_memory(username: str, site: Optional[str] = None) -> dict:
         """Report CPU and memory utilization of a target user's desktop(s).
         Resolves the user's active session(s) and returns current utilization
         plus network performance (bandwidth/latency) per session from the
         helpdesk performance endpoints."""
-        client = get_client(config)
+        _, client = site_client(config, site)
         sessions = lookup_user_session(client, username, active_only=False)
         result = []
         for s in sessions:
@@ -178,12 +179,12 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
         return {"username": username, "sessions": result}
 
     @mcp.tool()
-    def session_network_performance(session_id: str) -> dict:
+    def session_network_performance(session_id: str, site: Optional[str] = None) -> dict:
         """Return network performance for a user session: estimated bandwidth
         (kbps), round-trip latency (ms) and packet loss, from the display-
         protocol performance endpoint (PCoIP or BLAST). Session id comes from
         find_user_session. Useful for diagnosing slow/thin sessions."""
-        client = get_client(config)
+        _, client = site_client(config, site)
         net = _protocol_network(client, session_id)
         if not net:
             return {"session_id": session_id, "network": "unavailable"}
@@ -191,13 +192,14 @@ def register(mcp: "FastMCP", config: "HorizonConfig") -> None:
 
     @mcp.tool()
     def end_session_process(session_id: str, process_id: int, name: str,
-                            create_time_stamp: Optional[int] = None) -> dict:
+                            create_time_stamp: Optional[int] = None,
+                            site: Optional[str] = None) -> dict:
         """Terminate a process running on a user's desktop. process_id and name
         come from user_processes/session_processes; create_time_stamp is the
         process creation time (epoch ms) and is provided automatically when
         available. Use with caution -- terminating critical processes can crash
         the session."""
-        client = get_client(config)
+        _, client = site_client(config, site)
         # Try to fill create_time_stamp from the process listing if omitted.
         if create_time_stamp is None:
             procs = _helpdesk(client, session_id, HELPDESK_PROCESS_PATH)

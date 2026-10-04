@@ -14,7 +14,7 @@ import json
 import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 # Environment variable names
 ENV_BASE_URL = "HORIZON_BASE_URL"
@@ -25,6 +25,10 @@ ENV_CLIENT_ID = "HORIZON_CLIENT_ID"
 ENV_VERIFY_SSL = "HORIZON_VERIFY_SSL"
 ENV_CONFIG_FILE = "HORIZON_CONFIG_FILE"
 ENV_TIMEOUT = "HORIZON_TIMEOUT"
+# Optional JSON array of extra sites (multi-site / DR). Each entry:
+# {"name": "secondary", "base_url": "https://cloud-b.example.com",
+#  "role": "secondary", "username"/"password"/"domain"/"verify_ssl"/"timeout"}
+ENV_SITES = "HORIZON_SITES"
 # Optional bearer token that gates the network MCP endpoints when set.
 ENV_MCP_TOKEN = "HORIZON_MCP_AUTH_TOKEN"
 
@@ -44,11 +48,22 @@ class HorizonConfig:
     verify_ssl: bool = True
     # Connection / request timeout in seconds.
     timeout: int = 30
+    # Friendly name of this connection server (default/primary site).
+    site_name: str = ""
+    # Optional role tag for the default site: "primary" / "secondary" / "site".
+    site_role: str = ""
+    # Extra connection servers (multi-site / DR). Raw definitions; each entry
+    # overrides the top-level credentials only where it sets them.
+    sites: List[Dict[str, Any]] = field(default_factory=list)
 
     def redacted(self) -> dict:
         """Return a dict safe for logging (password redacted)."""
         d = asdict(self)
         d["password"] = _PASSWORD_TAG if d.get("password") else ""
+        d["sites"] = [
+            {**s, "password": _PASSWORD_TAG if s.get("password") else ""}
+            for s in (d.get("sites") or [])
+        ]
         return d
 
     def is_complete(self) -> bool:
@@ -89,6 +104,11 @@ def load_config(
                     "client_id", "verify_ssl", "timeout"):
             if key in data and data[key] is not None:
                 setattr(cfg, key, data[key])
+        if isinstance(data.get("sites"), list):
+            cfg.sites = data["sites"]
+        for key in ("site_name", "site_role"):
+            if data.get(key):
+                setattr(cfg, key, str(data[key]))
 
     # 2. Env variables override the file.
     if os.environ.get(ENV_BASE_URL):
@@ -108,6 +128,13 @@ def load_config(
             cfg.timeout = int(os.environ[ENV_TIMEOUT])
         except ValueError:
             pass
+    if os.environ.get(ENV_SITES):
+        try:
+            parsed = json.loads(os.environ[ENV_SITES])
+            if isinstance(parsed, list):
+                cfg.sites = parsed
+        except json.JSONDecodeError:
+            pass
 
     # 3. Explicit arguments win.
     if base_url is not None:
@@ -124,6 +151,10 @@ def load_config(
         cfg.timeout = int(timeout)
 
     cfg.base_url = cfg.base_url.rstrip("/")
+    if not cfg.site_name:
+        cfg.site_name = "primary"
+    if not cfg.site_role:
+        cfg.site_role = "primary"
     if not cfg.client_id:
         # Stable cache key derived from the server endpoint.
         cfg.client_id = cfg.base_url.replace("https://", "").replace("http://", "")
@@ -144,6 +175,92 @@ def load_config(
               "config init --config <file>`."
         )
     return cfg
+
+
+_SITE_ROLE_ALIASES = {
+    "primary": "primary", "prod": "primary", "production": "primary",
+    "secondary": "secondary", "dr": "secondary", "disaster-recovery": "secondary",
+    "disaster_recovery": "secondary", "standby": "secondary",
+}
+
+
+def _match_site(base: "HorizonConfig", site: str) -> Optional[Dict[str, Any]]:
+    """Find a configured site definition by name or role alias."""
+    key = (site or "").strip().lower()
+    if not key:
+        return None
+    role = _SITE_ROLE_ALIASES.get(key)
+    for s in base.sites or []:
+        if key == str(s.get("name", "")).lower():
+            return s
+        srole = str(s.get("role", "")).lower()
+        if role and _SITE_ROLE_ALIASES.get(srole) == role:
+            return s
+    return None
+
+
+def _site_to_config(base: "HorizonConfig", site: Dict[str, Any]) -> "HorizonConfig":
+    """Build a HorizonConfig for one site definition, inheriting defaults."""
+    name = str(site.get("name") or site.get("role") or "site")
+    base_url = (site.get("base_url") or base.base_url).rstrip("/")
+    if base_url == base.base_url:
+        # Same endpoint as the default server: reuse it (keeps one client).
+        return base
+    host = base_url.replace("https://", "").replace("http://", "")
+    return HorizonConfig(
+        base_url=base_url,
+        username=site.get("username") or base.username,
+        password=site.get("password") or base.password,
+        domain=site.get("domain") or base.domain,
+        client_id=f"{name}:{host}",
+        verify_ssl=base.verify_ssl if site.get("verify_ssl") is None else bool(site["verify_ssl"]),
+        timeout=int(site.get("timeout") or base.timeout),
+        site_name=name,
+        site_role=str(site.get("role") or "site"),
+    )
+
+
+def resolve_site(base: "HorizonConfig", site: Optional[str] = None) -> "HorizonConfig":
+    """Resolve a tool's ``site`` argument to a concrete connection-server config.
+
+    ``None``/``primary`` selects the default (or a site flagged primary),
+    ``secondary``/``dr`` the DR site, or any configured site name. Raises
+    ValueError naming the known sites when the request is unknown.
+    """
+    if not (site or "").strip():
+        return base
+    site_def = _match_site(base, site)
+    if site_def is None and (site or "").strip().lower() in ("primary", "default"):
+        return base
+    if site_def is None:
+        known = ", ".join(str(s.get("name", "?")) for s in (base.sites or [])) or "(none)"
+        raise ValueError(f"Unknown site {site!r}. Configured sites: {known}")
+    return _site_to_config(base, site_def)
+
+
+def iter_site_configs(base: "HorizonConfig") -> List["HorizonConfig"]:
+    """Return every configured site (default first), de-duplicated by endpoint."""
+    out: List[HorizonConfig] = [base]
+    seen = {base.base_url}
+    for s in base.sites or []:
+        cfg = _site_to_config(base, s)
+        if cfg.base_url in seen:
+            continue
+        seen.add(cfg.base_url)
+        out.append(cfg)
+    return out
+
+
+def list_sites_public(base: "HorizonConfig") -> List[Dict[str, Any]]:
+    """Public (redacted) description of every configured site."""
+    return [{
+        "name": cfg.site_name or "primary",
+        "role": cfg.site_role or "site",
+        "base_url": cfg.base_url,
+        "username": cfg.username,
+        "domain": cfg.domain,
+        "verify_ssl": cfg.verify_ssl,
+    } for cfg in iter_site_configs(base)]
 
 
 def configure_interactive(config_file: str) -> str:

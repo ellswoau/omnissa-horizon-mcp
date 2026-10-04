@@ -93,7 +93,16 @@ def build_server(config=None):
             "virtual-desktop environment: restart/log-off user desktops, list "
             "processes and CPU/memory utilization, desktop-pool health and "
             "machine/helpdesk operations. Look a user up with "
-            "find_user_session before acting on their desktop."
+            "find_user_session before acting on their desktop.\n\n"
+            "Multiple connection servers (sites) are configured: tools accept a "
+            "`site` argument (default primary; `secondary`/`dr` for the DR site; "
+            "`all` for read-only tools) and `list_sites` shows them. Pool "
+            "recovery: `enable_desktop_pool` re-enables a pool and its "
+            "provisioning after it was stopped by errors; "
+            "`desktop_pool_push_history` shows recent image pushes; and "
+            "`rollback_desktop_pool_image` re-pushes the previous golden-image "
+            "snapshot (keeping the current compute profile) -- it defaults to a "
+            "dry run and needs confirm=True."
         ),
     )
 

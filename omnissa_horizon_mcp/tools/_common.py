@@ -2,9 +2,30 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..client import HorizonClient, HorizonError
+from ..config import HorizonConfig, iter_site_configs, resolve_site
+
+
+def site_client(config: HorizonConfig, site: Optional[str] = None) -> Tuple[str, HorizonClient]:
+    """Return ``(site_name, client)`` for a tool's optional ``site`` argument.
+
+    ``site=None``/``primary`` targets the default connection server;
+    ``secondary``/``dr`` or a configured site name targets that site.
+    """
+    cfg = resolve_site(config, site)
+    from ..client import get_client
+    return (cfg.site_name or "primary", get_client(cfg))
+
+
+def site_clients(config: HorizonConfig, site: Optional[str] = None) -> List[Tuple[str, HorizonClient]]:
+    """Return ``[(site_name, client)]`` for one site, or every site when
+    ``site='all'`` (used by read-only listing/monitoring tools)."""
+    if (site or "").strip().lower() == "all":
+        from ..client import get_client
+        return [((c.site_name or "primary"), get_client(c)) for c in iter_site_configs(config)]
+    return [site_client(config, site)]
 
 #: Inventory endpoint used to list sessions.
 #:
